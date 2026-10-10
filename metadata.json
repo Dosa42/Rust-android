@@ -1,0 +1,6 @@
+{
+  "name": "Codex Proxy",
+  "description": "Embedded local proxy gateway for Codex and OpenAI with multi-account routing, JNI bridge, and live diagnostics",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

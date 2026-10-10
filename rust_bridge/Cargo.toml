@@ -1,0 +1,21 @@
+[package]
+name = "codex-proxy-jni"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "codex_proxy"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+jni = { version = "0.21", default-features = false }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite = { version = "0.31", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-android = "0.2"
+once_cell = "1.19"
