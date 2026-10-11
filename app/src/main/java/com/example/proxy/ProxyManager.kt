@@ -39,6 +39,8 @@ class ProxyManager private constructor(private val context: Context) {
 
     private var embeddedServer: EmbeddedProxyServer? = null
 
+    val openClaw = com.example.openclaw.OpenClawServerManager(context)
+
     private val _isProxyRunning = MutableStateFlow(false)
     val isProxyRunning: StateFlow<Boolean> = _isProxyRunning.asStateFlow()
 
@@ -56,6 +58,12 @@ class ProxyManager private constructor(private val context: Context) {
 
     private val _metrics = MutableStateFlow(ProxyMetrics())
     val metrics: StateFlow<ProxyMetrics> = _metrics.asStateFlow()
+
+    private val _bootstrapInstalling = MutableStateFlow(false)
+    val bootstrapInstalling: StateFlow<Boolean> = _bootstrapInstalling.asStateFlow()
+
+    private val _bootstrapProgress = MutableStateFlow("")
+    val bootstrapProgress: StateFlow<String> = _bootstrapProgress.asStateFlow()
 
     private val _testResponse = MutableStateFlow<String?>(null)
     val testResponse: StateFlow<String?> = _testResponse.asStateFlow()
@@ -251,5 +259,59 @@ class ProxyManager private constructor(private val context: Context) {
                 refreshData()
             }
         }
+    }
+
+    // ── OpenClaw Operations ──────────────────────────────────────────
+
+    fun installBootstrap(onComplete: (Boolean) -> Unit = {}) {
+        if (_bootstrapInstalling.value) return
+        scope.launch {
+            _bootstrapInstalling.value = true
+            _bootstrapProgress.value = "Starting installation…"
+            try {
+                com.example.openclaw.BootstrapInstaller.install(context) { msg ->
+                    _bootstrapProgress.value = msg
+                }
+                openClaw.ensureBionicCompat()
+                openClaw.ensureFullAccessConfig()
+                openClaw.ensureDefaultWorkspace()
+                openClaw.syncCodexAuthToOpenClaw()
+                _bootstrapProgress.value = "Installation completed successfully!"
+                onComplete(true)
+            } catch (e: Exception) {
+                _bootstrapProgress.value = "Installation failed: ${e.message}"
+                onComplete(false)
+            } finally {
+                _bootstrapInstalling.value = false
+            }
+        }
+    }
+
+    fun syncOpenClawToken(): Boolean {
+        return openClaw.syncCodexAuthToOpenClaw()
+    }
+
+    fun startOpenClawGateway(): Boolean {
+        return openClaw.startOpenClawGateway()
+    }
+
+    fun stopOpenClawGateway() {
+        openClaw.stopOpenClawGateway()
+    }
+
+    fun startOpenClawControlUi(): Boolean {
+        return openClaw.startOpenClawControlUiServer()
+    }
+
+    fun stopOpenClawControlUi() {
+        openClaw.stopOpenClawControlUiServer()
+    }
+
+    fun startConnectProxy(): Boolean {
+        return openClaw.startProxy()
+    }
+
+    fun stopConnectProxy() {
+        openClaw.stopProxy()
     }
 }

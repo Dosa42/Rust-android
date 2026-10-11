@@ -1,6 +1,13 @@
 package com.example.ui
 
+import android.annotation.SuppressLint
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -22,6 +29,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
@@ -318,10 +327,11 @@ fun ProxyDashboardScreen(manager: ProxyManager) {
             Spacer(modifier = Modifier.height(12.dp))
 
             // Tab Navigation
-            PrimaryTabRow(
+            ScrollableTabRow(
                 selectedTabIndex = selectedTab,
                 containerColor = DarkSurface,
                 contentColor = CyberCyan,
+                edgePadding = 8.dp,
                 divider = { Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(DarkBorder)) }
             ) {
                 Tab(
@@ -342,7 +352,12 @@ fun ProxyDashboardScreen(manager: ProxyManager) {
                 Tab(
                     selected = selectedTab == 3,
                     onClick = { selectedTab = 3 },
-                    text = { Text("JNI Architecture", fontSize = 13.sp, fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal) }
+                    text = { Text("JNI Native", fontSize = 13.sp, fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal) }
+                )
+                Tab(
+                    selected = selectedTab == 4,
+                    onClick = { selectedTab = 4 },
+                    text = { Text("OpenClaw", fontSize = 13.sp, fontWeight = if (selectedTab == 4) FontWeight.Bold else FontWeight.Normal) }
                 )
             }
 
@@ -372,6 +387,9 @@ fun ProxyDashboardScreen(manager: ProxyManager) {
                     3 -> JniArchitectureTab(
                         isNativeActive = isNativeActive,
                         port = port
+                    )
+                    4 -> OpenClawTab(
+                        manager = manager
                     )
                 }
             }
@@ -953,3 +971,485 @@ fun AddAccountDialog(
         containerColor = DarkSurface
     )
 }
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+fun OpenClawTab(manager: ProxyManager) {
+    val context = LocalContext.current
+    val isGatewayRunning by manager.openClaw.isGatewayRunning.collectAsState()
+    val isControlUiRunning by manager.openClaw.isControlUiRunning.collectAsState()
+    val isConnectProxyRunning by manager.openClaw.isConnectProxyRunning.collectAsState()
+    val openClawLogs by manager.openClaw.logs.collectAsState()
+    val bootstrapInstalling by manager.bootstrapInstalling.collectAsState()
+    val bootstrapProgress by manager.bootstrapProgress.collectAsState()
+
+    var showWebView by remember { mutableStateOf(false) }
+    var currentWebUrl by remember { mutableStateOf("http://127.0.0.1:19001/") }
+    var webViewInstance by remember { mutableStateOf<WebView?>(null) }
+
+    if (showWebView) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(DarkBackground)
+        ) {
+            // WebView Navigation Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(DarkSurface)
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = currentWebUrl,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = CyberCyan,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(
+                    onClick = { webViewInstance?.reload() },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Reload", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                }
+                IconButton(
+                    onClick = { showWebView = false },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(Icons.Default.Clear, contentDescription = "Close", tint = CyberRed, modifier = Modifier.size(18.dp))
+                }
+            }
+
+            // Interactive Android WebView
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f),
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.databaseEnabled = true
+                        settings.allowFileAccess = true
+                        settings.setSupportZoom(true)
+                        settings.builtInZoomControls = true
+                        settings.displayZoomControls = false
+
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
+                                view.loadUrl(url)
+                                currentWebUrl = url
+                                return true
+                            }
+                        }
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
+                                android.util.Log.d("OpenClawWebView", "[Console] ${msg.message()}")
+                                return true
+                            }
+                        }
+                        loadUrl(currentWebUrl)
+                        webViewInstance = this
+                    }
+                },
+                update = { view ->
+                    if (view.url != currentWebUrl) {
+                        view.loadUrl(currentWebUrl)
+                    }
+                }
+            )
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // Hero Header Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                shape = RoundedCornerShape(8.dp),
+                border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(CyberCyan.copy(alpha = 0.4f)))
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(if (isGatewayRunning) CyberGreen else CyberOrange)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "OPENCLAW ASSISTANT & CONTROL HUB",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = TextPrimary
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Termux Linux runtime embedding OpenClaw Gateway (18789), Control UI (19001), CONNECT Proxy (18924), and Codex App-Server, integrated with CCX local multiplexer.",
+                        fontSize = 11.sp,
+                        color = TextSecondary,
+                        lineHeight = 15.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Persistent SSoT Token Status
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(DarkBackground)
+                            .border(1.dp, CyberGreen.copy(alpha = 0.3f), RoundedCornerShape(6.dp))
+                            .padding(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "SSoT PERSISTENT ACCOUNT",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = CyberGreen,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "${com.example.proxy.CodexFixedAccount.EMAIL} (af8d241c...)",
+                                    fontSize = 11.sp,
+                                    color = TextPrimary,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            Button(
+                                onClick = {
+                                    val ok = manager.syncOpenClawToken()
+                                    Toast.makeText(context, if (ok) "Token Synced to OpenClaw" else "Sync Failed", Toast.LENGTH_SHORT).show()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CyberGreen.copy(alpha = 0.2f)),
+                                shape = RoundedCornerShape(4.dp),
+                                modifier = Modifier.testTag("sync_token_button")
+                            ) {
+                                Text("Sync Token", fontSize = 10.sp, color = CyberGreen, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Daemons Status Matrix Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                shape = RoundedCornerShape(8.dp),
+                border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(DarkBorder))
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "ACTIVE DAEMONS & SERVICE MATRIX",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = CyberCyan
+                    )
+
+                    // Daemon 1: OpenClaw Gateway (18789)
+                    DaemonRow(
+                        title = "OpenClaw Gateway",
+                        port = "18789 (WS)",
+                        isRunning = isGatewayRunning,
+                        onToggle = {
+                            if (isGatewayRunning) manager.stopOpenClawGateway()
+                            else manager.startOpenClawGateway()
+                        },
+                        tag = "gateway_toggle_button"
+                    )
+
+                    // Daemon 2: Control UI Server (19001)
+                    DaemonRow(
+                        title = "Control UI Server",
+                        port = "19001 (HTTP)",
+                        isRunning = isControlUiRunning,
+                        onToggle = {
+                            if (isControlUiRunning) manager.stopOpenClawControlUi()
+                            else manager.startOpenClawControlUi()
+                        },
+                        tag = "control_ui_toggle_button"
+                    )
+
+                    // Daemon 3: CONNECT Proxy (18924)
+                    DaemonRow(
+                        title = "CONNECT Proxy",
+                        port = "18924 (TCP)",
+                        isRunning = isConnectProxyRunning,
+                        onToggle = {
+                            if (isConnectProxyRunning) manager.stopConnectProxy()
+                            else manager.startConnectProxy()
+                        },
+                        tag = "connect_proxy_toggle_button"
+                    )
+
+                    // Daemon 4: CCX Relay Gateway (8080)
+                    DaemonRow(
+                        title = "CCX Relay Multiplexer",
+                        port = "${manager.proxyPort.value} (HTTP)",
+                        isRunning = manager.isProxyRunning.value,
+                        onToggle = {
+                            if (manager.isProxyRunning.value) manager.stopProxy()
+                            else manager.startProxy()
+                        },
+                        tag = "ccx_proxy_toggle_button"
+                    )
+                }
+            }
+        }
+
+        // Web Viewer & Control UI Launchers
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                shape = RoundedCornerShape(8.dp),
+                border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(DarkBorder))
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "WEB VIEWER & EXTERNAL LAUNCHERS",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = CyberCyan
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                currentWebUrl = "http://127.0.0.1:19001/"
+                                showWebView = true
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.weight(1f).testTag("open_control_ui_button")
+                        ) {
+                            Text("Open Control UI (19001)", fontSize = 11.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            onClick = {
+                                currentWebUrl = "file:///android_asset/web/index.html"
+                                showWebView = true
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceElevated),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.weight(1f).testTag("open_bundled_web_button")
+                        ) {
+                            Text("Open Bundled Web (Assets)", fontSize = 11.sp, color = TextPrimary)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                try {
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:19001/"))
+                                    context.startActivity(intent)
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Cannot open browser: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Open in Browser", fontSize = 11.sp, color = TextSecondary)
+                        }
+
+                        Button(
+                            onClick = {
+                                manager.installBootstrap { success ->
+                                    Toast.makeText(context, if (success) "Bootstrap Ready" else "Install Failed", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            enabled = !bootstrapInstalling,
+                            colors = ButtonDefaults.buttonColors(containerColor = CyberOrange.copy(alpha = 0.3f)),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.weight(1f).testTag("bootstrap_install_button")
+                        ) {
+                            if (bootstrapInstalling) {
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), color = CyberOrange, strokeWidth = 2.dp)
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                            Text(if (bootstrapInstalling) "Installing…" else "Setup Bootstrap", fontSize = 11.sp, color = CyberOrange, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    if (bootstrapProgress.isNotEmpty()) {
+                        Text(
+                            text = bootstrapProgress,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = CyberOrange
+                        )
+                    }
+                }
+            }
+        }
+
+        // OpenClaw Real-Time Terminal Logs
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                shape = RoundedCornerShape(8.dp),
+                border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(DarkBorder))
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Terminal, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "PROCESS TERMINAL & OUTPUT LOGS",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                color = CyberCyan
+                            )
+                        }
+                        Text(
+                            text = "${openClawLogs.size} lines",
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = TextMuted
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(240.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(CodeBackground)
+                            .border(1.dp, DarkBorder, RoundedCornerShape(6.dp))
+                            .padding(8.dp)
+                    ) {
+                        if (openClawLogs.isEmpty()) {
+                            Text(
+                                text = "No process logs yet. Start the Gateway, Control UI, or Bootstrap setup to see live daemon output.",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = TextMuted
+                            )
+                        } else {
+                            SelectionContainer {
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    reverseLayout = true
+                                ) {
+                                    items(openClawLogs.reversed()) { line ->
+                                        Text(
+                                            text = line,
+                                            fontSize = 10.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = when {
+                                                line.contains("error", ignoreCase = true) || line.contains("failed", ignoreCase = true) -> CyberRed
+                                                line.contains("started", ignoreCase = true) || line.contains("success", ignoreCase = true) -> CyberGreen
+                                                line.contains("download", ignoreCase = true) || line.contains("extract", ignoreCase = true) -> CyberOrange
+                                                else -> TextSecondary
+                                            },
+                                            lineHeight = 14.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DaemonRow(
+    title: String,
+    port: String,
+    isRunning: Boolean,
+    onToggle: () -> Unit,
+    tag: String
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .background(DarkBackground)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(if (isRunning) CyberGreen else CyberRed)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column {
+                Text(
+                    text = title,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = port,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = TextSecondary
+                )
+            }
+        }
+
+        Button(
+            onClick = onToggle,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isRunning) CyberRed.copy(alpha = 0.2f) else CyberGreen.copy(alpha = 0.2f)
+            ),
+            shape = RoundedCornerShape(4.dp),
+            modifier = Modifier.testTag(tag)
+        ) {
+            Text(
+                text = if (isRunning) "Stop" else "Start",
+                fontSize = 10.sp,
+                color = if (isRunning) CyberRed else CyberGreen,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+

@@ -61,4 +61,28 @@ class ExampleRobolectricTest {
     assertTrue(convertedResponses.contains("Ping CCX"))
     assertTrue(convertedResponses.contains("input"))
   }
+
+  @Test
+  fun `test openclaw bootstrap paths and auth sync`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val paths = com.example.openclaw.BootstrapInstaller.getPaths(context)
+    assertTrue(paths.prefixDir.endsWith("/usr"))
+    assertTrue(paths.homeDir.endsWith("/home"))
+
+    val manager = com.example.openclaw.OpenClawServerManager(context)
+    val synced = manager.syncCodexAuthToOpenClaw()
+    assertTrue(synced)
+
+    val codexAuth = java.io.File(paths.homeDir, ".codex/auth.json")
+    assertTrue(codexAuth.exists())
+    assertTrue(codexAuth.readText().contains(CodexFixedAccount.EMAIL))
+
+    val openClawAuth = java.io.File(paths.homeDir, ".openclaw/auth-profiles.json")
+    assertTrue(openClawAuth.exists())
+    assertTrue(openClawAuth.readText().contains("openai-codex:codex-cli"))
+
+    val openClawConfig = java.io.File(paths.homeDir, ".openclaw/openclaw.json")
+    assertTrue(openClawConfig.exists())
+    assertTrue(openClawConfig.readText().contains("dangerouslyDisableDeviceAuth"))
+  }
 }
