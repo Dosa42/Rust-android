@@ -4,7 +4,6 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
-import java.util.UUID
 
 data class ProxyAccount(
     val id: Long = 0,
@@ -13,7 +12,9 @@ data class ProxyAccount(
     val apiKey: String,
     val baseUrl: String,
     val isActive: Boolean = true,
-    val requestCount: Long = 0
+    val requestCount: Long = 0,
+    val accountId: String = "",
+    val refreshToken: String = ""
 )
 
 data class ProxyLog(
@@ -38,7 +39,7 @@ class ProxyDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
 
     companion object {
         const val DB_NAME = "codex_proxy.db"
-        const val DB_VERSION = 1
+        const val DB_VERSION = 2
 
         private const val TABLE_ACCOUNTS = "accounts"
         private const val TABLE_LOGS = "logs"
@@ -63,7 +64,9 @@ class ProxyDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 api_key TEXT NOT NULL,
                 base_url TEXT NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 1,
-                request_count INTEGER NOT NULL DEFAULT 0
+                request_count INTEGER NOT NULL DEFAULT 0,
+                account_id TEXT DEFAULT '',
+                refresh_token TEXT DEFAULT ''
             )
             """.trimIndent()
         )
@@ -82,39 +85,89 @@ class ProxyDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             """.trimIndent()
         )
 
-        // Seed default developer account for instant testing
-        val cv = ContentValues().apply {
-            put("name", "Local Dev Account")
-            put("provider", "Codex")
-            put("api_key", "sk-dev-${UUID.randomUUID().toString().take(12)}")
-            put("base_url", "https://api.openai.com/v1")
-            put("is_active", 1)
-            put("request_count", 0)
-        }
-        db.insert(TABLE_ACCOUNTS, null, cv)
+        // Seed persistent hardcoded Codex account
+        insertFixedAccount(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS $TABLE_LOGS")
-        db.execSQL("DROP TABLE IF EXISTS $TABLE_ACCOUNTS")
-        onCreate(db)
+        if (oldVersion < 2) {
+            try {
+                db.execSQL("ALTER TABLE $TABLE_ACCOUNTS ADD COLUMN account_id TEXT DEFAULT ''")
+            } catch (_: Exception) {}
+            try {
+                db.execSQL("ALTER TABLE $TABLE_ACCOUNTS ADD COLUMN refresh_token TEXT DEFAULT ''")
+            } catch (_: Exception) {}
+            ensureFixedAccount(db)
+        }
+    }
+
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        ensureFixedAccount(db)
+    }
+
+    private fun insertFixedAccount(db: SQLiteDatabase) {
+        val fixed = CodexFixedAccount.toProxyAccount()
+        val cv = ContentValues().apply {
+            put("id", 1L)
+            put("name", fixed.name)
+            put("provider", fixed.provider)
+            put("api_key", fixed.apiKey)
+            put("base_url", fixed.baseUrl)
+            put("is_active", 1)
+            put("request_count", 0)
+            put("account_id", fixed.accountId)
+            put("refresh_token", fixed.refreshToken)
+        }
+        db.insertWithOnConflict(TABLE_ACCOUNTS, null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    private fun ensureFixedAccount(db: SQLiteDatabase) {
+        try {
+            val cursor = db.rawQuery(
+                "SELECT COUNT(*) FROM $TABLE_ACCOUNTS WHERE account_id = ? OR id = 1",
+                arrayOf(CodexFixedAccount.ACCOUNT_ID)
+            )
+            val count = cursor.use {
+                if (it.moveToFirst()) it.getInt(0) else 0
+            }
+            if (count == 0) {
+                insertFixedAccount(db)
+            }
+        } catch (_: Exception) {
+            // In case table is still initializing
+        }
     }
 
     fun getAllAccounts(): List<ProxyAccount> {
         val list = mutableListOf<ProxyAccount>()
-        val db = readableDatabase
+        val db = writableDatabase
+        ensureFixedAccount(db)
+
         val cursor = db.query(TABLE_ACCOUNTS, null, null, null, null, null, "id ASC")
         cursor.use {
+            val idIdx = it.getColumnIndexOrThrow("id")
+            val nameIdx = it.getColumnIndexOrThrow("name")
+            val providerIdx = it.getColumnIndexOrThrow("provider")
+            val apiKeyIdx = it.getColumnIndexOrThrow("api_key")
+            val baseUrlIdx = it.getColumnIndexOrThrow("base_url")
+            val isActiveIdx = it.getColumnIndexOrThrow("is_active")
+            val reqCountIdx = it.getColumnIndexOrThrow("request_count")
+            val accountIdIdx = it.getColumnIndex("account_id")
+            val refreshIdx = it.getColumnIndex("refresh_token")
+
             while (it.moveToNext()) {
                 list.add(
                     ProxyAccount(
-                        id = it.getLong(it.getColumnIndexOrThrow("id")),
-                        name = it.getString(it.getColumnIndexOrThrow("name")),
-                        provider = it.getString(it.getColumnIndexOrThrow("provider")),
-                        apiKey = it.getString(it.getColumnIndexOrThrow("api_key")),
-                        baseUrl = it.getString(it.getColumnIndexOrThrow("base_url")),
-                        isActive = it.getInt(it.getColumnIndexOrThrow("is_active")) == 1,
-                        requestCount = it.getLong(it.getColumnIndexOrThrow("request_count"))
+                        id = it.getLong(idIdx),
+                        name = it.getString(nameIdx),
+                        provider = it.getString(providerIdx),
+                        apiKey = it.getString(apiKeyIdx),
+                        baseUrl = it.getString(baseUrlIdx),
+                        isActive = it.getInt(isActiveIdx) == 1,
+                        requestCount = it.getLong(reqCountIdx),
+                        accountId = if (accountIdIdx >= 0) it.getString(accountIdIdx) ?: "" else "",
+                        refreshToken = if (refreshIdx >= 0) it.getString(refreshIdx) ?: "" else ""
                     )
                 )
             }
@@ -131,6 +184,8 @@ class ProxyDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             put("base_url", account.baseUrl)
             put("is_active", if (account.isActive) 1 else 0)
             put("request_count", account.requestCount)
+            put("account_id", account.accountId)
+            put("refresh_token", account.refreshToken)
         }
         return db.insert(TABLE_ACCOUNTS, null, cv)
     }

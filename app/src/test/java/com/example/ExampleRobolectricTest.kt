@@ -2,6 +2,7 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.proxy.CodexFixedAccount
 import com.example.proxy.ProxyAccount
 import com.example.proxy.ProxyDatabase
 import org.junit.Assert.assertEquals
@@ -30,6 +31,7 @@ class ExampleRobolectricTest {
 
     val initialAccounts = db.getAllAccounts()
     assertTrue(initialAccounts.isNotEmpty())
+    assertEquals(CodexFixedAccount.ACCOUNT_ID, initialAccounts.first().accountId)
 
     val newId = db.insertAccount(
       ProxyAccount(
@@ -45,5 +47,18 @@ class ExampleRobolectricTest {
     val found = updatedAccounts.find { it.id == newId }
     assertNotNull(found)
     assertEquals("Test Unit Account", found?.name)
+  }
+
+  @Test
+  fun `test CCXProtocolConverter cross-protocol conversions`() {
+    val codexPayload = """{"model":"gpt-4o","input":[{"type":"message","role":"user","content":[{"type":"text","text":"Hello CCX"}]}]}"""
+    val convertedChat = com.example.proxy.CCXProtocolConverter.responsesToChat(codexPayload)
+    assertTrue(convertedChat.contains("Hello CCX"))
+    assertTrue(convertedChat.contains("messages"))
+
+    val chatPayload = """{"model":"gpt-4o","messages":[{"role":"user","content":"Ping CCX"}]}"""
+    val convertedResponses = com.example.proxy.CCXProtocolConverter.chatToResponses(chatPayload)
+    assertTrue(convertedResponses.contains("Ping CCX"))
+    assertTrue(convertedResponses.contains("input"))
   }
 }

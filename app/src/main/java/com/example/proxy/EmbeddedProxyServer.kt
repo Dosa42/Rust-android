@@ -11,7 +11,6 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -36,9 +35,9 @@ class EmbeddedProxyServer(
     private val startTime = System.currentTimeMillis()
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(120, TimeUnit.SECONDS)
         .build()
 
     @Volatile
@@ -55,7 +54,7 @@ class EmbeddedProxyServer(
             isRunning = true
 
             serverJob = scope.launch {
-                Log.i(TAG, "Codex Proxy Daemon started on http://127.0.0.1:$port")
+                Log.i(TAG, "CCX Multi-Protocol Proxy Daemon started on http://127.0.0.1:$port")
                 while (isActive && isRunning) {
                     try {
                         val client = socket.accept()
@@ -84,7 +83,7 @@ class EmbeddedProxyServer(
             serverSocket = null
             serverJob?.cancel()
             serverJob = null
-            Log.i(TAG, "Codex Proxy Daemon stopped.")
+            Log.i(TAG, "CCX Proxy Daemon stopped.")
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping proxy server: ${e.message}")
         }
@@ -98,7 +97,7 @@ class EmbeddedProxyServer(
         var provider = "Local"
 
         try {
-            client.soTimeout = 30000
+            client.soTimeout = 60000
             val input = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
             val output = client.getOutputStream()
 
@@ -140,121 +139,236 @@ class EmbeddedProxyServer(
                 ""
             }
 
+            // Normalize path (handle optional :routePrefix like /myroute/v1/responses -> /v1/responses)
+            val normalizedPath = when {
+                path.contains("/v1/") -> "/v1/" + path.substringAfter("/v1/")
+                path.contains("/v1beta/") -> "/v1beta/" + path.substringAfter("/v1beta/")
+                else -> path
+            }
+
+            val accounts = db.getAllAccounts().filter { it.isActive }
+            val activeAccount = accounts.minByOrNull { it.requestCount }
+
             when {
-                path == "/" || path == "/health" -> {
+                // Health Check
+                normalizedPath == "/" || normalizedPath == "/health" -> {
                     statusCode = 200
                     val json = JSONObject().apply {
                         put("status", "healthy")
-                        put("proxy", "codex-proxy-rs-android")
+                        put("service", "ccx-multiplexed-gateway-android")
                         put("port", port)
                         put("uptime_sec", (System.currentTimeMillis() - startTime) / 1000)
-                        put("active_accounts", db.getAllAccounts().count { it.isActive })
+                        put("active_accounts", accounts.size)
+                        put("endpoints", JSONObject().apply {
+                            put("codex_responses", "POST /v1/responses")
+                            put("claude_messages", "POST /v1/messages")
+                            put("openai_chat", "POST /v1/chat/completions")
+                            put("models_list", "GET /v1/models")
+                            put("gemini_native", "POST /v1beta/models/*")
+                            put("responses_compact", "POST /v1/responses/compact")
+                        })
                     }.toString()
                     sendJsonResponse(output, statusCode, json)
                 }
 
-                path.startsWith("/v1/models") -> {
-                    statusCode = 200
-                    val models = JSONArray().apply {
-                        put(JSONObject().apply { put("id", "gpt-4o"); put("object", "model"); put("owned_by", "openai") })
-                        put(JSONObject().apply { put("id", "o1-preview"); put("object", "model"); put("owned_by", "openai") })
-                        put(JSONObject().apply { put("id", "codex"); put("object", "model"); put("owned_by", "openai") })
-                        put(JSONObject().apply { put("id", "claude-3-5-sonnet"); put("object", "model"); put("owned_by", "anthropic") })
-                        put(JSONObject().apply { put("id", "grok-beta"); put("object", "model"); put("owned_by", "xai") })
+                // Models Discovery
+                normalizedPath.startsWith("/v1/models") && method == "GET" -> {
+                    if (activeAccount != null) {
+                        provider = activeAccount.name
+                        val upstreamUrl = if (activeAccount.baseUrl.endsWith("/models")) {
+                            activeAccount.baseUrl
+                        } else {
+                            activeAccount.baseUrl.trimEnd('/') + "/models"
+                        }
+
+                        val reqBuilder = Request.Builder()
+                            .url(upstreamUrl)
+                            .header("Authorization", "Bearer ${activeAccount.apiKey}")
+                            .get()
+
+                        if (activeAccount.accountId.isNotBlank()) {
+                            reqBuilder.header("ChatGPT-Account-Id", activeAccount.accountId)
+                            reqBuilder.header("OpenAI-Account-Id", activeAccount.accountId)
+                        }
+
+                        statusCode = executeForwardRequest(reqBuilder.build(), output)
+                    } else {
+                        statusCode = 400
+                        sendJsonResponse(output, 400, missingAccountError("No active upstream account configured."))
                     }
-                    val json = JSONObject().apply {
-                        put("object", "list")
-                        put("data", models)
-                    }.toString()
-                    sendJsonResponse(output, statusCode, json)
                 }
 
-                path.startsWith("/v1/chat/completions") && method == "POST" -> {
-                    val accounts = db.getAllAccounts().filter { it.isActive }
-                    val activeAccount = accounts.minByOrNull { it.requestCount }
-
-                    if (activeAccount != null && activeAccount.apiKey.startsWith("sk-") && !activeAccount.apiKey.contains("sk-dev-")) {
+                // CCX Codex Responses API (POST /v1/responses)
+                normalizedPath.startsWith("/v1/responses") && method == "POST" && !normalizedPath.contains("/compact") -> {
+                    if (activeAccount != null) {
                         provider = activeAccount.name
                         db.incrementAccountRequests(activeAccount.id)
 
-                        // Forward to real upstream provider
+                        val mediaType = "application/json; charset=utf-8".toMediaType()
+
+                        if (activeAccount.provider.equals("Claude", ignoreCase = true)) {
+                            // Cross-protocol: Convert Codex Responses payload to Claude Messages
+                            val chatPayload = CCXProtocolConverter.responsesToChat(body)
+                            val upstreamUrl = activeAccount.baseUrl.trimEnd('/') + "/messages"
+                            val req = Request.Builder()
+                                .url(upstreamUrl)
+                                .header("x-api-key", activeAccount.apiKey)
+                                .header("anthropic-version", "2023-06-01")
+                                .header("Content-Type", "application/json")
+                                .post(chatPayload.toRequestBody(mediaType))
+                                .build()
+                            statusCode = executeForwardRequest(req, output)
+                        } else {
+                            // Native Codex / OpenAI Responses API
+                            val upstreamUrl = if (activeAccount.baseUrl.endsWith("/responses")) {
+                                activeAccount.baseUrl
+                            } else {
+                                activeAccount.baseUrl.trimEnd('/') + "/responses"
+                            }
+
+                            val reqBuilder = Request.Builder()
+                                .url(upstreamUrl)
+                                .header("Authorization", "Bearer ${activeAccount.apiKey}")
+                                .header("Content-Type", "application/json")
+                                .post(body.toRequestBody(mediaType))
+
+                            if (activeAccount.accountId.isNotBlank()) {
+                                reqBuilder.header("ChatGPT-Account-Id", activeAccount.accountId)
+                                reqBuilder.header("OpenAI-Account-Id", activeAccount.accountId)
+                            }
+
+                            statusCode = executeForwardRequest(reqBuilder.build(), output)
+                        }
+                    } else {
+                        statusCode = 401
+                        sendJsonResponse(output, 401, missingAccountError("No active account for Codex /v1/responses."))
+                    }
+                }
+
+                // CCX Codex Context Compaction (POST /v1/responses/compact)
+                normalizedPath.startsWith("/v1/responses/compact") && method == "POST" -> {
+                    if (activeAccount != null) {
+                        provider = activeAccount.name
+                        val upstreamUrl = activeAccount.baseUrl.trimEnd('/') + "/responses/compact"
+                        val mediaType = "application/json; charset=utf-8".toMediaType()
+                        val reqBuilder = Request.Builder()
+                            .url(upstreamUrl)
+                            .header("Authorization", "Bearer ${activeAccount.apiKey}")
+                            .header("Content-Type", "application/json")
+                            .post(body.toRequestBody(mediaType))
+
+                        if (activeAccount.accountId.isNotBlank()) {
+                            reqBuilder.header("ChatGPT-Account-Id", activeAccount.accountId)
+                            reqBuilder.header("OpenAI-Account-Id", activeAccount.accountId)
+                        }
+                        statusCode = executeForwardRequest(reqBuilder.build(), output)
+                    } else {
+                        statusCode = 401
+                        sendJsonResponse(output, 401, missingAccountError("No active account for /v1/responses/compact."))
+                    }
+                }
+
+                // CCX Claude Messages API (POST /v1/messages)
+                normalizedPath.startsWith("/v1/messages") && method == "POST" -> {
+                    if (activeAccount != null) {
+                        provider = activeAccount.name
+                        db.incrementAccountRequests(activeAccount.id)
+
+                        val mediaType = "application/json; charset=utf-8".toMediaType()
+
+                        if (activeAccount.provider.equals("Claude", ignoreCase = true)) {
+                            // Native Claude passthrough
+                            val upstreamUrl = if (activeAccount.baseUrl.endsWith("/messages")) {
+                                activeAccount.baseUrl
+                            } else {
+                                activeAccount.baseUrl.trimEnd('/') + "/messages"
+                            }
+                            val req = Request.Builder()
+                                .url(upstreamUrl)
+                                .header("x-api-key", activeAccount.apiKey)
+                                .header("anthropic-version", "2023-06-01")
+                                .header("Content-Type", "application/json")
+                                .post(body.toRequestBody(mediaType))
+                                .build()
+                            statusCode = executeForwardRequest(req, output)
+                        } else {
+                            // Cross-protocol: Convert Claude Messages to Codex Responses or OpenAI Chat
+                            val responsesPayload = CCXProtocolConverter.claudeToResponses(body)
+                            val upstreamUrl = activeAccount.baseUrl.trimEnd('/') + "/responses"
+                            val reqBuilder = Request.Builder()
+                                .url(upstreamUrl)
+                                .header("Authorization", "Bearer ${activeAccount.apiKey}")
+                                .header("Content-Type", "application/json")
+                                .post(responsesPayload.toRequestBody(mediaType))
+
+                            if (activeAccount.accountId.isNotBlank()) {
+                                reqBuilder.header("ChatGPT-Account-Id", activeAccount.accountId)
+                                reqBuilder.header("OpenAI-Account-Id", activeAccount.accountId)
+                            }
+                            statusCode = executeForwardRequest(reqBuilder.build(), output)
+                        }
+                    } else {
+                        statusCode = 401
+                        sendJsonResponse(output, 401, missingAccountError("No active account for /v1/messages."))
+                    }
+                }
+
+                // OpenAI Chat Completions API (POST /v1/chat/completions)
+                normalizedPath.startsWith("/v1/chat/completions") && method == "POST" -> {
+                    if (activeAccount != null) {
+                        provider = activeAccount.name
+                        db.incrementAccountRequests(activeAccount.id)
+
+                        val mediaType = "application/json; charset=utf-8".toMediaType()
                         val upstreamUrl = if (activeAccount.baseUrl.endsWith("/chat/completions")) {
                             activeAccount.baseUrl
                         } else {
                             activeAccount.baseUrl.trimEnd('/') + "/chat/completions"
                         }
 
-                        val mediaType = "application/json; charset=utf-8".toMediaType()
-                        val req = Request.Builder()
+                        val reqBuilder = Request.Builder()
                             .url(upstreamUrl)
                             .header("Authorization", "Bearer ${activeAccount.apiKey}")
                             .header("Content-Type", "application/json")
                             .post(body.toRequestBody(mediaType))
-                            .build()
 
-                        try {
-                            httpClient.newCall(req).execute().use { resp ->
-                                statusCode = resp.code
-                                val respBytes = resp.body?.bytes() ?: ByteArray(0)
-                                val responseHeader = "HTTP/1.1 $statusCode ${resp.message}\r\n" +
-                                        "Content-Type: ${resp.header("Content-Type", "application/json")}\r\n" +
-                                        "Content-Length: ${respBytes.size}\r\n" +
-                                        "Access-Control-Allow-Origin: *\r\n\r\n"
-                                output.write(responseHeader.toByteArray(Charsets.UTF_8))
-                                output.write(respBytes)
-                                output.flush()
-                            }
-                        } catch (e: Exception) {
-                            statusCode = 502
-                            sendJsonResponse(output, 502, JSONObject().apply {
-                                put("error", JSONObject().apply {
-                                    put("message", "Upstream proxy error: ${e.message}")
-                                    put("type", "upstream_error")
-                                })
-                            }.toString())
+                        if (activeAccount.accountId.isNotBlank()) {
+                            reqBuilder.header("ChatGPT-Account-Id", activeAccount.accountId)
+                            reqBuilder.header("OpenAI-Account-Id", activeAccount.accountId)
                         }
+
+                        statusCode = executeForwardRequest(reqBuilder.build(), output)
                     } else {
-                        // High-speed developer simulation mode for local testing
-                        provider = activeAccount?.name ?: "Local Engine"
-                        activeAccount?.let { db.incrementAccountRequests(it.id) }
-                        statusCode = 200
-
-                        val userMessage = try {
-                            val jsonObj = JSONObject(body)
-                            val messages = jsonObj.optJSONArray("messages")
-                            messages?.optJSONObject(messages.length() - 1)?.optString("content") ?: "Hello"
-                        } catch (e: Exception) {
-                            "Hello from Codex Proxy"
-                        }
-
-                        val mockResponse = JSONObject().apply {
-                            put("id", "chatcmpl-proxy-${System.currentTimeMillis()}")
-                            put("object", "chat.completion")
-                            put("created", System.currentTimeMillis() / 1000)
-                            put("model", "codex-proxy-v1")
-                            val choices = JSONArray().apply {
-                                put(JSONObject().apply {
-                                    put("index", 0)
-                                    put("message", JSONObject().apply {
-                                        put("role", "assistant")
-                                        put("content", "[Proxied via Codex-Proxy-RS on 127.0.0.1:$port]\nEcho: $userMessage\nStatus: 200 OK | Upstream: $provider")
-                                    })
-                                    put("finish_reason", "stop")
-                                })
-                            }
-                            put("choices", choices)
-                            put("usage", JSONObject().apply {
-                                put("prompt_tokens", userMessage.length / 4)
-                                put("completion_tokens", 45)
-                                put("total_tokens", (userMessage.length / 4) + 45)
-                            })
-                        }.toString()
-
-                        sendJsonResponse(output, statusCode, mockResponse)
+                        statusCode = 401
+                        sendJsonResponse(output, 401, missingAccountError("No active account for /v1/chat/completions."))
                     }
                 }
 
-                path.startsWith("/admin/stats") -> {
+                // Codex Alpha Layer Passthrough (POST /v1/alpha/*)
+                normalizedPath.startsWith("/v1/alpha/") && method == "POST" -> {
+                    if (activeAccount != null) {
+                        provider = activeAccount.name
+                        val upstreamUrl = activeAccount.baseUrl.trimEnd('/') + normalizedPath
+                        val mediaType = "application/json; charset=utf-8".toMediaType()
+                        val reqBuilder = Request.Builder()
+                            .url(upstreamUrl)
+                            .header("Authorization", "Bearer ${activeAccount.apiKey}")
+                            .header("Content-Type", "application/json")
+                            .post(body.toRequestBody(mediaType))
+
+                        if (activeAccount.accountId.isNotBlank()) {
+                            reqBuilder.header("ChatGPT-Account-Id", activeAccount.accountId)
+                            reqBuilder.header("OpenAI-Account-Id", activeAccount.accountId)
+                        }
+                        statusCode = executeForwardRequest(reqBuilder.build(), output)
+                    } else {
+                        statusCode = 401
+                        sendJsonResponse(output, 401, missingAccountError("No active account for /v1/alpha/."))
+                    }
+                }
+
+                // Admin Stats
+                normalizedPath.startsWith("/admin/stats") -> {
                     statusCode = 200
                     val metrics = db.getMetrics()
                     val json = JSONObject().apply {
@@ -271,7 +385,7 @@ class EmbeddedProxyServer(
                     statusCode = 404
                     val json = JSONObject().apply {
                         put("error", JSONObject().apply {
-                            put("message", "Route '$path' not found")
+                            put("message", "Route '$normalizedPath' not found in CCX multiplexer.")
                             put("type", "invalid_request_error")
                         })
                     }.toString()
@@ -299,10 +413,72 @@ class EmbeddedProxyServer(
         }
     }
 
+    private fun executeForwardRequest(req: Request, output: OutputStream): Int {
+        return try {
+            httpClient.newCall(req).execute().use { resp ->
+                val code = resp.code
+                val contentType = resp.header("Content-Type", "application/json; charset=utf-8")
+                val isStreaming = contentType?.contains("text/event-stream") == true
+
+                if (isStreaming) {
+                    val responseHeader = "HTTP/1.1 $code ${resp.message}\r\n" +
+                            "Content-Type: $contentType\r\n" +
+                            "Transfer-Encoding: chunked\r\n" +
+                            "Access-Control-Allow-Origin: *\r\n\r\n"
+                    output.write(responseHeader.toByteArray(Charsets.UTF_8))
+
+                    val source = resp.body?.source()
+                    if (source != null) {
+                        val buffer = ByteArray(4096)
+                        while (!source.exhausted()) {
+                            val read = source.read(buffer)
+                            if (read <= 0) break
+                            val chunkHeader = Integer.toHexString(read) + "\r\n"
+                            output.write(chunkHeader.toByteArray(Charsets.UTF_8))
+                            output.write(buffer, 0, read)
+                            output.write("\r\n".toByteArray(Charsets.UTF_8))
+                            output.flush()
+                        }
+                        output.write("0\r\n\r\n".toByteArray(Charsets.UTF_8))
+                        output.flush()
+                    }
+                } else {
+                    val respBytes = resp.body?.bytes() ?: ByteArray(0)
+                    val responseHeader = "HTTP/1.1 $code ${resp.message}\r\n" +
+                            "Content-Type: $contentType\r\n" +
+                            "Content-Length: ${respBytes.size}\r\n" +
+                            "Access-Control-Allow-Origin: *\r\n\r\n"
+                    output.write(responseHeader.toByteArray(Charsets.UTF_8))
+                    output.write(respBytes)
+                    output.flush()
+                }
+                code
+            }
+        } catch (e: Exception) {
+            sendJsonResponse(output, 502, JSONObject().apply {
+                put("error", JSONObject().apply {
+                    put("message", "Upstream connection failed: ${e.message}")
+                    put("type", "upstream_error")
+                })
+            }.toString())
+            502
+        }
+    }
+
+    private fun missingAccountError(msg: String): String {
+        return JSONObject().apply {
+            put("error", JSONObject().apply {
+                put("message", msg)
+                put("type", "missing_upstream_account")
+            })
+        }.toString()
+    }
+
     private fun sendJsonResponse(output: OutputStream, code: Int, json: String) {
         val statusText = when (code) {
             200 -> "OK"
             400 -> "Bad Request"
+            401 -> "Unauthorized"
             404 -> "Not Found"
             500 -> "Internal Server Error"
             502 -> "Bad Gateway"

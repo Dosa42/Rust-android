@@ -137,9 +137,9 @@ class ProxyManager private constructor(private val context: Context) {
 
     fun addAccount(name: String, provider: String, apiKey: String, baseUrl: String) {
         val account = ProxyAccount(
-            name = name.ifBlank { "Account-${System.currentTimeMillis() % 1000}" },
+            name = name.ifBlank { "$provider Account" },
             provider = provider,
-            apiKey = apiKey.ifBlank { "sk-test-${System.currentTimeMillis()}" },
+            apiKey = apiKey.trim(),
             baseUrl = baseUrl.ifBlank { "https://api.openai.com/v1" },
             isActive = true
         )
@@ -162,7 +162,7 @@ class ProxyManager private constructor(private val context: Context) {
         refreshData()
     }
 
-    fun sendTestPrompt(prompt: String) {
+    fun sendTestPrompt(prompt: String, endpoint: String = "/v1/responses") {
         if (!_isProxyRunning.value) {
             _testResponse.value = "Error: Proxy is stopped. Start proxy first."
             return
@@ -170,24 +170,64 @@ class ProxyManager private constructor(private val context: Context) {
 
         scope.launch {
             _isTesting.value = true
-            _testResponse.value = "Sending request to http://127.0.0.1:${_proxyPort.value}/v1/chat/completions..."
+            val targetUrl = "http://127.0.0.1:${_proxyPort.value}$endpoint"
+            _testResponse.value = "Routing $endpoint request to $targetUrl..."
 
-            val requestJson = JSONObject().apply {
-                put("model", "gpt-4o")
-                val messages = JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("content", prompt)
-                    })
+            val requestJson = when {
+                endpoint.contains("/v1/responses") -> {
+                    // Codex Responses schema
+                    JSONObject().apply {
+                        put("model", "gpt-4o")
+                        val inputArr = JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("type", "message")
+                                put("role", "user")
+                                put("content", JSONArray().apply {
+                                    put(JSONObject().apply {
+                                        put("type", "text")
+                                        put("text", prompt)
+                                    })
+                                })
+                            })
+                        }
+                        put("input", inputArr)
+                        put("stream", false)
+                    }.toString()
                 }
-                put("messages", messages)
-                put("temperature", 0.7)
-            }.toString()
+                endpoint.contains("/v1/messages") -> {
+                    // Claude Messages schema
+                    JSONObject().apply {
+                        put("model", "claude-3-5-sonnet")
+                        val msgs = JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("role", "user")
+                                put("content", prompt)
+                            })
+                        }
+                        put("messages", msgs)
+                        put("max_tokens", 1024)
+                    }.toString()
+                }
+                else -> {
+                    // OpenAI Chat schema
+                    JSONObject().apply {
+                        put("model", "gpt-4o")
+                        val msgs = JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("role", "user")
+                                put("content", prompt)
+                            })
+                        }
+                        put("messages", msgs)
+                    }.toString()
+                }
+            }
 
             val mediaType = "application/json; charset=utf-8".toMediaType()
             val request = Request.Builder()
-                .url("http://127.0.0.1:${_proxyPort.value}/v1/chat/completions")
-                .header("Authorization", "Bearer sk-codex-test-client")
+                .url(targetUrl)
+                .header("Authorization", "Bearer sk-ccx-client-relay")
+                .header("Content-Type", "application/json")
                 .post(requestJson.toRequestBody(mediaType))
                 .build()
 
@@ -199,16 +239,9 @@ class ProxyManager private constructor(private val context: Context) {
                     val code = resp.code
 
                     if (resp.isSuccessful) {
-                        val parsed = try {
-                            val json = JSONObject(body)
-                            val choice = json.optJSONArray("choices")?.optJSONObject(0)
-                            choice?.optJSONObject("message")?.optString("content") ?: body
-                        } catch (e: Exception) {
-                            body
-                        }
-                        _testResponse.value = "Status $code OK (${latency}ms):\n\n$parsed"
+                        _testResponse.value = "HTTP $code OK (${latency}ms) via $endpoint:\n\n$body"
                     } else {
-                        _testResponse.value = "Status $code Error (${latency}ms):\n$body"
+                        _testResponse.value = "HTTP $code Error (${latency}ms) via $endpoint:\n\n$body"
                     }
                 }
             } catch (e: Exception) {

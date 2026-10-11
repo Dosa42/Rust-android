@@ -204,6 +204,35 @@ fun ProxyDashboardScreen(manager: ProxyManager) {
                                 fontFamily = FontFamily.Monospace,
                                 color = CyberCyan
                             )
+                            Row(
+                                modifier = Modifier.padding(top = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(CyberGreen.copy(alpha = 0.15f))
+                                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                                ) {
+                                    Text("/v1/responses", fontSize = 9.sp, color = CyberGreen, fontFamily = FontFamily.Monospace)
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(CyberCyan.copy(alpha = 0.15f))
+                                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                                ) {
+                                    Text("/v1/messages", fontSize = 9.sp, color = CyberCyan, fontFamily = FontFamily.Monospace)
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(CyberOrange.copy(alpha = 0.15f))
+                                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                                ) {
+                                    Text("/v1/chat/completions", fontSize = 9.sp, color = CyberOrange, fontFamily = FontFamily.Monospace)
+                                }
+                            }
                         }
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -393,11 +422,39 @@ fun TestConsoleTab(
     port: Int
 ) {
     var prompt by remember { mutableStateOf("Write a 1-line Python code to print Hello World") }
+    var selectedEndpoint by remember { mutableStateOf("/v1/responses") }
+    val endpoints = listOf(
+        "/v1/responses" to "Codex Responses",
+        "/v1/messages" to "Claude Messages",
+        "/v1/chat/completions" to "OpenAI Chat"
+    )
 
     Column(modifier = Modifier.fillMaxSize()) {
-        Text("Interactive Proxy Test Playground", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-        Spacer(modifier = Modifier.height(6.dp))
-        Text("Sends standard OpenAI chat completion request to 127.0.0.1:$port/v1/chat/completions", fontSize = 11.sp, color = TextMuted)
+        Text("Interactive CCX Relay Playground", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text("Target Endpoint: http://127.0.0.1:$port$selectedEndpoint", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = CyberCyan)
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Protocol selector chips
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            endpoints.forEach { (ep, label) ->
+                Button(
+                    onClick = { selectedEndpoint = ep },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (selectedEndpoint == ep) CyberCyan else DarkSurfaceElevated,
+                        contentColor = if (selectedEndpoint == ep) Color.Black else TextSecondary
+                    ),
+                    shape = RoundedCornerShape(6.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(label, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -426,7 +483,7 @@ fun TestConsoleTab(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
-                onClick = { manager.sendTestPrompt(prompt) },
+                onClick = { manager.sendTestPrompt(prompt, selectedEndpoint) },
                 enabled = !isTesting,
                 colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
                 shape = RoundedCornerShape(8.dp),
@@ -437,11 +494,11 @@ fun TestConsoleTab(
                 if (isTesting) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.Black)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Proxying...", color = Color.Black, fontSize = 12.sp)
+                    Text("Proxying via $selectedEndpoint...", color = Color.Black, fontSize = 12.sp)
                 } else {
                     Icon(Icons.Default.Send, contentDescription = "Send", modifier = Modifier.size(14.dp), tint = Color.Black)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Execute Local Proxy Request", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text("Execute Relay to $selectedEndpoint", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -541,10 +598,24 @@ fun AccountsTab(
                                     ) {
                                         Text(acc.provider, fontSize = 10.sp, color = CyberCyan, fontFamily = FontFamily.Monospace)
                                     }
+                                    if (acc.id == 1L) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(CyberGreen.copy(alpha = 0.15f))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text("FIXED SSoT", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = CyberGreen, fontFamily = FontFamily.Monospace)
+                                        }
+                                    }
                                 }
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text("Endpoint: ${acc.baseUrl}", fontSize = 11.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
-                                Text("Key: ${acc.apiKey.take(8)}... | Requests: ${acc.requestCount}", fontSize = 10.sp, color = TextMuted)
+                                if (acc.accountId.isNotBlank()) {
+                                    Text("Account ID: ${acc.accountId}", fontSize = 10.sp, color = CyberCyan, fontFamily = FontFamily.Monospace)
+                                }
+                                Text("Token: ${acc.apiKey.take(16)}... | Requests: ${acc.requestCount}", fontSize = 10.sp, color = TextMuted)
                             }
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
